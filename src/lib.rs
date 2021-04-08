@@ -1,4 +1,5 @@
-#![deny(missing_docs)]
+//#![deny(missing_docs)]
+#![feature(array_chunks, const_fn, slice_as_chunks, array_zip, const_generics, const_evaluatable_checked)]
 
 //! `nnnoiseless` is a crate for removing noise from audio. The main entry point is
 //! [`DenoiseState`].
@@ -18,7 +19,8 @@ mod rnn;
 mod util;
 
 pub use denoise::DenoiseState;
-pub use rnn::RnnModel;
+pub use model::INPUT_DENSE_WEIGHTS;
+pub use rnn::{RnnModel, SubMatrix, Matrix};
 
 pub(crate) const FRAME_SIZE_SHIFT: usize = 2;
 pub(crate) const FRAME_SIZE: usize = 120 << FRAME_SIZE_SHIFT;

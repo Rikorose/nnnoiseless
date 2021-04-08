@@ -29,6 +29,10 @@ required-features = ["bin"]
 name = "sin"
 harness = false
 
+[[bench]]
+name = "sgemv"
+harness = false
+
 [dependencies]
 anyhow = { version = "1.0.32", optional = true }
 clap = { version = "2.33.2", optional = true }
@@ -42,6 +46,8 @@ libc = { version = "0.2", optional = true }
 [dev-dependencies]
 criterion = "0.3.3"
 static_assertions = "1.1.0"
+rand = "0.8.3"
+rand_chacha = "0.3.0"
 
 [package.metadata.capi]
 header_name = "rnnoise"

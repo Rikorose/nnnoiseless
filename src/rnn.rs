@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, fmt::Debug};
 
 use crate::util::{relu, sigmoid_approx, tansig_approx, zip3};
 
@@ -290,7 +290,7 @@ impl DenseLayer {
 
     fn compute(&self, output: &mut [f32], input: &[f32]) {
         copy_i8(output, &self.bias[..]);
-        self.matrix().mul_add(output, input);
+        self.matrix().sgemv(output, input);
 
         match self.activation {
             Activation::Sigmoid => {
@@ -337,24 +337,24 @@ impl GruLayer {
 
         // Compute update gate.
         copy_i8(&mut z[0..n], &self.bias[0..n]);
-        self.input_submatrix(0).mul_add(&mut z[0..n], input);
-        self.rec_submatrix(0).mul_add(&mut z[0..n], &state[..]);
+        self.input_submatrix(0).sgemv(&mut z[0..n], input);
+        self.rec_submatrix(0).sgemv(&mut z[0..n], &state[..]);
         for z in z[0..n].iter_mut() {
             *z = sigmoid_approx(WEIGHTS_SCALE * *z);
         }
 
         // Compute reset gate.
         copy_i8(&mut r[0..n], &self.bias[n..(2 * n)]);
-        self.input_submatrix(n).mul_add(&mut r[0..n], input);
-        self.rec_submatrix(n).mul_add(&mut r[0..n], &state[..]);
+        self.input_submatrix(n).sgemv(&mut r[0..n], input);
+        self.rec_submatrix(n).sgemv(&mut r[0..n], &state[..]);
         for (out, &s) in r[0..n].iter_mut().zip(&state[..]) {
             *out = s * sigmoid_approx(WEIGHTS_SCALE * *out);
         }
 
         // Compute output.
         copy_i8(&mut h[0..n], &self.bias[(2 * n)..]);
-        self.input_submatrix(2 * n).mul_add(&mut h[0..n], input);
-        self.rec_submatrix(2 * n).mul_add(&mut h[0..n], &r[0..n]);
+        self.input_submatrix(2 * n).sgemv(&mut h[0..n], input);
+        self.rec_submatrix(2 * n).sgemv(&mut h[0..n], &r[0..n]);
 
         for (s, &z, &h) in zip3(state, &z[0..n], &h[0..n]) {
             let h = match self.activation {
@@ -433,18 +433,204 @@ fn copy_i8(dst: &mut [f32], src: &[i8]) {
     }
 }
 
-struct SubMatrix<'a> {
-    data: &'a [i8],
-    stride: usize,
-    offset: usize,
+use std::ops::{Add, AddAssign, Mul, Sub, SubAssign};
+
+/// The requirements for a type to be a Matrix Cell. Numeric types fulfill these
+/// requirements, and many of them can be derived as needed
+pub trait MatrixCell<T>:
+    Add<Output = T> + Mul<Output = T> + Sub<Output = T> + AddAssign + SubAssign + Copy + From<i8>
+{
+}
+impl<
+        T: Add<Output = T>
+            + Mul<Output = T>
+            + Sub<Output = T>
+            + AddAssign
+            + SubAssign
+            + Copy
+            + From<i8>,
+    > MatrixCell<T> for T
+{
+}
+
+/// Uses const generics to represent a mathematical matrix
+#[derive(Copy, Clone)]
+pub struct Matrix<'a, const L: usize> {
+    pub inner: &'a [i8; L],
+}
+
+impl<'a, const L: usize> Matrix<'a, L> {
+    pub fn new(inner: &'a [i8; L]) -> Self {
+        Matrix { inner }
+    }
+    //pub fn from_slice(slc: &'a [i8]) -> Self {
+    //    assert!(slc.len() == C * R);
+    //    unsafe {
+    //        let inner: &[i8; R * C] = &from_raw_parts(slc.as_ptr().cast(), 1)[0];
+    //        Matrix { inner }
+    //    }
+    //}
+
+    //pub fn sgemv<T: MatrixCell<T>>(&self, output: &mut [T; R], input: &[T; C])
+    //    where [(), R * C]:
+    //{
+    //    for c in 0..C {
+    //        let mut r = 0;
+    //        while r < R {
+    //            output[r] += T::from(self.inner[c * R + r]) * input[c];
+    //            r += 1;
+    //        }
+    //    }
+    //}
+
+    //pub fn sgemv_colwise_step<T: MatrixCell<T>, const STEP: usize>(
+    //    &self,
+    //    output: &mut [T; R],
+    //    input: &[T; C],
+    //) {
+    //    assert_eq!(R % STEP, 0);
+    //    for (col, &input) in self.inner.chunks_exact(R).zip(input) {
+    //        for (col_chunk, out_chunk) in col.chunks_exact(STEP).zip(output.chunks_exact_mut(STEP))
+    //        {
+    //            for (&x, out) in col_chunk[..].iter().zip(&mut out_chunk[..]) {
+    //                *out += T::from(x) * input;
+    //            }
+    //        }
+    //    }
+    //}
+
+    //pub fn sgemv_colwise_step<T: MatrixCell<T>, const STEP: usize>(&self, output: &mut [T; R], input: & [T; C]) {
+    //    assert_eq!(R % STEP, 0);
+    //    for (col, &input) in self.inner.chunks_exact(R).zip(input) {
+    //        for (col_chunk, out_chunk) in col.chunks_exact(STEP).zip(output.chunks_exact_mut(STEP)) {
+    //            for (&x, out) in col_chunk[..].iter().zip(&mut out_chunk[..]) {
+    //                *out += T::from(x) * input;
+    //            }
+    //        }
+    //    }
+    //}
+}
+
+pub struct SubMatrix<'a> {
+    pub data: &'a [i8],
+    pub stride: usize,
+    pub offset: usize,
 }
 
 impl<'a> SubMatrix<'a> {
-    fn mul_add(&self, output: &mut [f32], input: &[f32]) {
+    pub fn sgemv(&self, output: &mut [f32], input: &[f32]) {
         for (col, input) in self.data.chunks_exact(self.stride).zip(input) {
             for (&x, out) in col[self.offset..].iter().zip(&mut output[..]) {
                 *out += x as f32 * input;
             }
+        }
+    }
+
+    pub fn sgemv_colwise_step(&self, output: &mut [f32], input: &[f32]) {
+        const STEP: usize = 24;
+        assert_eq!(self.stride % STEP, 0);
+        for (col, input) in self.data.chunks_exact(self.stride).zip(input) {
+            for (col_chunk, out_chunk) in col[self.offset..]
+                .chunks_exact(STEP)
+                .zip(output.chunks_exact_mut(STEP))
+            {
+                for (&x, out) in col_chunk.iter().zip(&mut out_chunk[..]) {
+                    *out += x as f32 * input;
+                }
+            }
+        }
+    }
+
+    pub fn sgemv_rowwise(&self, output: &mut [f32], input: &[f32]) {
+        const STEP: usize = 24;
+        let w_size = self.data[self.offset..].len() - self.stride + STEP;
+        for (row_offsets, out) in self.data[self.offset..]
+            .windows(w_size)
+            .zip(output.array_chunks_mut::<STEP>())
+        {
+            for (w, inp) in row_offsets
+                .array_chunks::<STEP>()
+                .step_by(self.stride / STEP)
+                .zip(input)
+            {
+                for (&x, y) in w.iter().zip(&mut out[..]) {
+                    *y += x as f32 * inp;
+                }
+                //out[0] += w[0] as f32 * inp;
+                //out[1] += w[1] as f32 * inp;
+                //out[2] += w[2] as f32 * inp;
+                //out[3] += w[3] as f32 * inp;
+                //out[4] += w[4] as f32 * inp;
+                //out[5] += w[5] as f32 * inp;
+                //out[6] += w[6] as f32 * inp;
+                //out[7] += w[7] as f32 * inp;
+
+                //out[8] += w[8] as f32 * inp;
+                //out[9] += w[9] as f32 * inp;
+                //out[10] += w[10] as f32 * inp;
+                //out[11] += w[11] as f32 * inp;
+                //out[12] += w[12] as f32 * inp;
+                //out[13] += w[13] as f32 * inp;
+                //out[14] += w[14] as f32 * inp;
+                //out[15] += w[15] as f32 * inp;
+
+                //out[16] += w[16] as f32 * inp;
+                //out[17] += w[17] as f32 * inp;
+                //out[18] += w[18] as f32 * inp;
+                //out[19] += w[19] as f32 * inp;
+                //out[20] += w[20] as f32 * inp;
+                //out[21] += w[21] as f32 * inp;
+                //out[22] += w[22] as f32 * inp;
+                //out[23] += w[23] as f32 * inp;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+    use super::*;
+    use rand::prelude::*;
+    use rand_chacha;
+
+    fn generate_vec(len: usize) -> Vec<f32> {
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
+        let mut vec = Vec::with_capacity(len);
+        for _ in 0..len {
+            vec.push(rng.gen::<f32>());
+        }
+        return vec;
+    }
+
+    #[test]
+    fn compare_sgemv() {
+        const NB_INPUTS: usize = 42;
+        const NB_NEURONS: usize = 24;
+        let weights = model::INPUT_DENSE_WEIGHTS;
+        let input = generate_vec(NB_INPUTS);
+        //let mut out_sgemv = [0.0; NB_NEURONS];
+        //let mut out_sgemv_rowwise = [0.0; NB_NEURONS];
+        let mut out_sgemv: Vec<f32> = (0..NB_NEURONS).map(|x| x as f32).collect();
+        let mut out_sgemv_other: Vec<f32> = (0..NB_NEURONS).map(|x| x as f32).collect();
+        let m = SubMatrix {
+            data: weights.as_ref(),
+            stride: NB_NEURONS,
+            offset: 0,
+        };
+        let tmp = &weights[..NB_NEURONS];
+        println!("w ..NB_NEURONS: {:?}", tmp);
+        m.sgemv(&mut out_sgemv, &input[..]);
+        //let mut out: [f32; NB_NEURONS] =
+        //    unsafe { out_sgemv_other.as_chunks_unchecked_mut::<NB_NEURONS>()[0] };
+        //let inp: [f32; NB_INPUTS] = unsafe { input.as_chunks_unchecked::<NB_INPUTS>()[0] };
+        //let m_const = Matrix::<NB_NEURONS, NB_INPUTS>::new(&weights);
+        //println!("{:?}", m_const.inner[0]);
+        //m_const.sgemv_colwise_step::<f32, 24>(&mut out, &inp);
+        //m.sgemv_colwise_step(&mut out_sgemv_other, &input[..]);
+        for (a, b) in out_sgemv.iter().zip(out_sgemv_other.iter()) {
+            println!("a: {:?}, b: {:?}", a, b);
+            assert!((a - b).abs() < 1e-10);
         }
     }
 }
